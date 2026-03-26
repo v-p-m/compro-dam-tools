@@ -1,0 +1,11 @@
+# Binary
+*.exe
+*.exe~
+ 
+# Config with secrets - use config.yaml.example instead
+config.yaml
+ 
+# Go
+*.test
+*.out
+/vendor/

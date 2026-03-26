@@ -1,0 +1,7 @@
+port: 8080
+files_dir: ./files
+bearer_token: your-secret-token-here
+max_ids: 20
+max_body_size: 1024
+delete_retries: 5
+delete_retry_delay: 500ms
