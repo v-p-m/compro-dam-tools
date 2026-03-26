@@ -5,3 +5,6 @@ max_ids: 20
 max_body_size: 1024
 delete_retries: 5
 delete_retry_delay: 500ms
+dam_base_url: https://images.dam.com/images
+dam_bearer_token: your-dam-token-here
+dam_timeout: 2s

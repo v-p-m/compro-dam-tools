@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -22,10 +23,14 @@ type Config struct {
 	MaxBodySize      int64         `yaml:"max_body_size"`
 	DeleteRetries    int           `yaml:"delete_retries"`
 	DeleteRetryDelay time.Duration `yaml:"delete_retry_delay"`
+	DAMBaseURL       string        `yaml:"dam_base_url"`
+	DAMBearerToken   string        `yaml:"dam_bearer_token"`
+	DAMTimeout       time.Duration `yaml:"dam_timeout"`
 }
 
 var cfg Config
 var validID = regexp.MustCompile(`^\d{6}$|^\d{9}$`)
+var fileIDPattern = regexp.MustCompile(`(?:preview)?(\d{6}|\d{9})\.jpg$`)
 
 func loadConfig(path string) error {
 	f, err := os.Open(path)
@@ -61,6 +66,15 @@ func loadConfig(path string) error {
 	}
 	if cfg.DeleteRetryDelay <= 0 {
 		return fmt.Errorf("delete_retry_delay must be greater than 0")
+	}
+	if cfg.DAMBaseURL == "" {
+		return fmt.Errorf("dam_base_url must be set")
+	}
+	if cfg.DAMBearerToken == "" {
+		return fmt.Errorf("dam_bearer_token must be set")
+	}
+	if cfg.DAMTimeout <= 0 {
+		return fmt.Errorf("dam_timeout must be greater than 0")
 	}
 
 	return nil
@@ -166,12 +180,94 @@ func removeWithRetry(path string) error {
 	return fmt.Errorf("file still locked after %d attempts", cfg.DeleteRetries)
 }
 
+// --- /api/refresh ---
+
+func refreshHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+
+	go runRefresh()
+}
+
+func runRefresh() {
+	entries, err := os.ReadDir(cfg.FilesDir)
+	if err != nil {
+		log.Printf("refresh: failed to read files_dir: %v", err)
+		return
+	}
+
+	cutoff := time.Now().AddDate(0, 0, -2)
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+
+		info, err := entry.Info()
+		if err != nil {
+			log.Printf("refresh: could not stat %s: %v", name, err)
+			continue
+		}
+
+		if info.ModTime().After(cutoff) {
+			continue
+		}
+
+		path := filepath.Join(cfg.FilesDir, name)
+
+		// Delete the file
+		if err := removeWithRetry(path); err != nil {
+			log.Printf("refresh: failed to delete %s: %v", path, err)
+			continue
+		}
+
+		matches := fileIDPattern.FindStringSubmatch(name)
+		if matches != nil {
+			callDAMAPI(matches[1])
+		}
+	}
+}
+
+func callDAMAPI(id string) {
+	url := fmt.Sprintf("%s/%s", strings.TrimRight(cfg.DAMBaseURL, "/"), id)
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.DAMTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		log.Printf("dam api: failed to create request for ID %s: %v", id, err)
+
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.DAMBearerToken)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("dam api: request failed for ID %s: %v", id, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	log.Printf("dam api: called for ID %s, status %d", id, resp.StatusCode)
+}
+
 func main() {
 	if err := loadConfig("config.yaml"); err != nil {
 		log.Fatalf("config error: %v", err)
 	}
 
 	http.HandleFunc("/api/delete", authMiddleware(deleteHandler))
+	http.HandleFunc("/api/refresh", authMiddleware(refreshHandler))
+
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("listening on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
